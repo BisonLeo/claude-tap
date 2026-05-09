@@ -103,6 +103,33 @@ def test_extract_metadata_counts_responses_tool_search_call_from_body_output() -
     assert meta["response_tool_names"] == ["tool_search"]
 
 
+def test_extract_metadata_counts_generic_responses_tool_call_items() -> None:
+    record = {
+        "turn": 1,
+        "request": {
+            "method": "POST",
+            "path": "/v1/responses",
+            "body": {"model": "gpt-5.5", "input": [{"role": "user", "content": "Search."}]},
+        },
+        "response": {
+            "status": 200,
+            "body": {
+                "output": [
+                    {"type": "web_search_call", "status": "completed", "action": {"type": "search", "query": "docs"}},
+                    {"type": "file_search_call", "status": "completed", "queries": ["parser"]},
+                    {"type": "custom_tool_call", "status": "completed", "name": "deploy_preview"},
+                ],
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        },
+    }
+
+    meta = _extract_metadata(json.dumps(record))
+
+    assert meta is not None
+    assert meta["response_tool_names"] == ["web_search", "file_search", "deploy_preview"]
+
+
 def test_extract_metadata_counts_ws_tool_search_call_output_item_when_completed_output_is_empty() -> None:
     record = {
         "turn": 1,
@@ -237,6 +264,15 @@ def test_extract_request_messages_normalizes_responses_function_call_input_items
                     "type": "function_call",
                     "name": "missing_args",
                 },
+                {
+                    "type": "web_search_call",
+                    "action": {"type": "search", "query": "Responses items"},
+                },
+                {
+                    "type": "computer_call_output",
+                    "call_id": "call_screen",
+                    "output": {"type": "computer_screenshot", "image_url": "https://example.test/screen.png"},
+                },
             ]
         }
     )
@@ -249,6 +285,18 @@ def test_extract_request_messages_normalizes_responses_function_call_input_items
     assert messages[2] == {"role": "tool", "content": '[project]\nname = "claude-tap"'}
     assert messages[3]["content"][0]["input"] == "not json"
     assert messages[4]["content"][0]["input"] == {}
+    assert messages[5] == {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "name": "web_search",
+                "input": {"action": {"type": "search", "query": "Responses items"}},
+            }
+        ],
+    }
+    assert messages[6]["role"] == "tool"
+    assert "computer_screenshot" in messages[6]["content"]
 
 
 def test_extract_request_messages_normalizes_responses_tool_search_output_input_items() -> None:

@@ -278,6 +278,42 @@ def test_viewer_reconstructs_ws_output_from_output_item_done_when_completed_outp
     assert "Recovered from ws_events" in detail_text
 
 
+def test_viewer_normalizes_generic_responses_tool_call_items(responses_page) -> None:
+    result = responses_page.evaluate(
+        """() => {
+          const body = {
+            input: [
+              { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Search the docs.' }] },
+              { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'Responses items' } },
+              {
+                type: 'computer_call_output',
+                call_id: 'call_screen',
+                output: { type: 'computer_screenshot', image_url: 'https://example.test/screen.png' }
+              }
+            ]
+          };
+          const output = normalizeResponseOutput([
+            { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'Responses items' } },
+            { type: 'file_search_call', status: 'completed', queries: ['viewer parser'] },
+            { type: 'custom_tool_call', status: 'completed', name: 'deploy_preview' }
+          ]);
+          const messages = getMessages(body);
+          return {
+            responseNames: output.content.filter(block => block.type === 'tool_use').map(block => block.name),
+            responseInputs: output.content.filter(block => block.type === 'tool_use').map(block => block.input),
+            roles: messages.map(message => message.role),
+            renderedMessages: renderMessages(messages)
+          };
+        }"""
+    )
+
+    assert result["responseNames"] == ["web_search", "file_search", "deploy_preview"]
+    assert result["responseInputs"][0] == {"action": {"type": "search", "query": "Responses items"}}
+    assert result["roles"] == ["user", "assistant", "tool"]
+    assert "web_search" in result["renderedMessages"]
+    assert "computer_screenshot" in result["renderedMessages"]
+
+
 def test_viewer_renders_codex_tool_search_call_and_output(responses_page) -> None:
     result = responses_page.evaluate(
         """() => {
