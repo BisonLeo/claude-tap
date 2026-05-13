@@ -3,7 +3,7 @@
 ## `check_coverage.py`
 
 Enforce project and incremental coverage targets for backend Python code and the
-inline JavaScript in `claude_tap/viewer.html`.
+inline JavaScript and CSS in `claude_tap/viewer.html`.
 
 Targets are configured in `pyproject.toml` under `[tool.claude_tap.coverage]`:
 
@@ -11,6 +11,8 @@ Targets are configured in `pyproject.toml` under `[tool.claude_tap.coverage]`:
 - Python changed executable package lines: `python_diff_min`
 - Viewer JavaScript function coverage: `viewer_js_function_min`
 - Viewer changed JavaScript functions: `viewer_js_diff_min`
+- Viewer CSS selector coverage: `viewer_css_selector_min`
+- Viewer changed CSS selectors: `viewer_css_diff_min`
 
 ### Usage
 

@@ -100,6 +100,8 @@ python_total_min = 65.0
 python_diff_min = 80.0
 viewer_js_function_min = 50.0
 viewer_js_diff_min = 80.0
+viewer_css_selector_min = 65.0
+viewer_css_diff_min = 80.0
 
 [dependency-groups]
 dev = [

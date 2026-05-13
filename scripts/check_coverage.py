@@ -28,6 +28,8 @@ DEFAULT_THRESHOLDS = {
     "python_diff_min": 80.0,
     "viewer_js_function_min": 50.0,
     "viewer_js_diff_min": 80.0,
+    "viewer_css_selector_min": 65.0,
+    "viewer_css_diff_min": 80.0,
 }
 
 
@@ -200,6 +202,78 @@ def changed_viewer_functions(viewer_html: Path, changed_lines: dict[str, set[int
     return functions
 
 
+def _split_selectors(selector_text: str) -> list[str]:
+    return [part.strip() for part in selector_text.split(",") if part.strip()]
+
+
+def _is_queryable_selector(selector: str) -> bool:
+    return not re.search(
+        r"::|:(hover|active|focus|focus-visible|focus-within|visited|target|checked|disabled|enabled|placeholder-shown)\b",
+        selector,
+    )
+
+
+def _style_block_ranges(source: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for idx, line in enumerate(source.splitlines(), start=1):
+        if "<style>" in line:
+            start = idx + 1
+            continue
+        if "</style>" in line and start is not None:
+            ranges.append((start, idx - 1))
+            start = None
+    return ranges
+
+
+def css_selector_ranges(source: str) -> dict[str, list[tuple[int, int]]]:
+    lines = source.splitlines()
+    ranges: dict[str, list[tuple[int, int]]] = {}
+
+    for style_start, style_end in _style_block_ranges(source):
+        line_no = style_start
+        while line_no <= style_end:
+            line = lines[line_no - 1]
+            if "{" not in line:
+                line_no += 1
+                continue
+            selector_text = line.split("{", 1)[0].strip()
+            if not selector_text or selector_text.startswith("@"):
+                line_no += 1
+                continue
+
+            depth = 0
+            end_line = line_no
+            for scan in range(line_no, style_end + 1):
+                for char in lines[scan - 1]:
+                    if char == "{":
+                        depth += 1
+                    elif char == "}":
+                        depth -= 1
+                if depth <= 0:
+                    end_line = scan
+                    break
+
+            for selector in _split_selectors(selector_text):
+                if _is_queryable_selector(selector):
+                    ranges.setdefault(selector, []).append((line_no, end_line))
+            line_no = max(end_line + 1, line_no + 1)
+
+    return ranges
+
+
+def changed_viewer_css_selectors(viewer_html: Path, changed_lines: dict[str, set[int]]) -> set[str]:
+    changed = changed_lines.get("claude_tap/viewer.html", set())
+    if not changed:
+        return set()
+    ranges = css_selector_ranges(viewer_html.read_text(encoding="utf-8"))
+    selectors: set[str] = set()
+    for selector, selector_ranges in ranges.items():
+        if any(start <= line <= end for start, end in selector_ranges for line in changed):
+            selectors.add(selector)
+    return selectors
+
+
 def _main_viewer_script(coverage: dict[str, Any], suffix: str) -> dict[str, Any]:
     candidates = [
         script
@@ -221,12 +295,7 @@ def _is_top_level_wrapper(function: dict[str, Any], script_end: int) -> bool:
     return script_end > 0 and widest >= script_end * 0.8
 
 
-def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:  # pragma: no cover - exercised in dependency-free environments
-        raise RuntimeError("Playwright is required for viewer JS coverage") from exc
-
+def _load_viewer_contract_helpers() -> tuple[Any, Any]:
     contracts_path = REPO_ROOT / "tests" / "test_viewer_contracts.py"
     spec = importlib.util.spec_from_file_location("viewer_contracts_for_coverage", contracts_path)
     if spec is None or spec.loader is None:
@@ -234,8 +303,16 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
     contracts = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = contracts
     spec.loader.exec_module(contracts)
-    _contract_cases = contracts._contract_cases
-    _generate_case_html = contracts._generate_case_html
+    return contracts._contract_cases, contracts._generate_case_html
+
+
+def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised in dependency-free environments
+        raise RuntimeError("Playwright is required for viewer JS coverage") from exc
+
+    _contract_cases, _generate_case_html = _load_viewer_contract_helpers()
 
     with tempfile.TemporaryDirectory() as tmp:
         html_path = _generate_case_html(
@@ -284,6 +361,95 @@ def collect_viewer_js_coverage() -> tuple[float, set[str], int, int]:
     return percent, covered_names, len(covered_functions), len(functions)
 
 
+def collect_viewer_css_coverage() -> tuple[float, set[str], int, int, int]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - exercised in dependency-free environments
+        raise RuntimeError("Playwright is required for viewer CSS coverage") from exc
+
+    _contract_cases, _generate_case_html = _load_viewer_contract_helpers()
+    collect_css_script = r"""() => {
+      const skipped = [];
+      const used = new Set();
+      const all = [];
+      const skipRe = /::|:(hover|active|focus|focus-visible|focus-within|visited|target|checked|disabled|enabled|placeholder-shown)\b/;
+      const splitSelectors = text => text.split(',').map(s => s.trim()).filter(Boolean);
+      const visit = rules => {
+        for (const rule of Array.from(rules || [])) {
+          if (rule.type === CSSRule.STYLE_RULE) {
+            for (const selector of splitSelectors(rule.selectorText)) {
+              if (skipRe.test(selector)) {
+                skipped.push(selector);
+                continue;
+              }
+              try {
+                all.push(selector);
+                if (document.querySelector(selector)) used.add(selector);
+              } catch (e) {
+                skipped.push(selector);
+              }
+            }
+          } else if (rule.cssRules) {
+            visit(rule.cssRules);
+          }
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets)) {
+        try { visit(sheet.cssRules); } catch (e) {}
+      }
+      return { used: [...used], all: [...new Set(all)], skipped: [...new Set(skipped)] };
+    }"""
+
+    used_selectors: set[str] = set()
+    all_selectors: set[str] = set()
+    skipped_selectors: set[str] = set()
+
+    def merge(snapshot: dict[str, list[str]]) -> None:
+        used_selectors.update(snapshot["used"])
+        all_selectors.update(snapshot["all"])
+        skipped_selectors.update(snapshot["skipped"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        html_path = _generate_case_html(
+            Path(tmp),
+            "css_usage",
+            tuple(record for case in _contract_cases() for record in case.records),
+        )
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.goto(html_path.resolve().as_uri(), timeout=10000)
+            page.wait_for_selector(".sidebar-item", timeout=5000)
+
+            for index in range(page.evaluate("entries.length")):
+                page.evaluate("entryIndex => renderDetail(entries[entryIndex])", index)
+                merge(page.evaluate(collect_css_script))
+
+            page.evaluate(
+                """() => {
+                  openGlobalSearch();
+                  const input = document.querySelector('#global-search-input');
+                  input.value = 'contract';
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                }"""
+            )
+            merge(page.evaluate(collect_css_script))
+
+            if page.evaluate("filtered.length") > 1:
+                page.evaluate("showDiffForIdx(1, null, 0)")
+                merge(page.evaluate(collect_css_script))
+
+            page.evaluate("document.documentElement.setAttribute('data-theme', 'dark')")
+            merge(page.evaluate(collect_css_script))
+            page.set_viewport_size({"width": 390, "height": 900})
+            page.evaluate("mobileShowDetail()")
+            merge(page.evaluate(collect_css_script))
+            browser.close()
+
+    percent = len(used_selectors) / len(all_selectors) * 100 if all_selectors else 100.0
+    return percent, used_selectors, len(used_selectors), len(all_selectors), len(skipped_selectors)
+
+
 def check_viewer_js_coverage(
     changed_functions: set[str],
     function_min: float,
@@ -327,6 +493,50 @@ def check_viewer_js_coverage(
     return results
 
 
+def check_viewer_css_coverage(
+    changed_selectors: set[str],
+    selector_min: float,
+    diff_min: float,
+    coverage: tuple[float, set[str], int, int, int] | None = None,
+) -> list[CheckResult]:
+    selector_percent, used_selectors, used_count, total_count, skipped_count = coverage or collect_viewer_css_coverage()
+    results = [
+        CheckResult(
+            name="viewer_css_selectors",
+            percent=selector_percent,
+            minimum=selector_min,
+            passed=selector_percent >= selector_min,
+            detail=f"{used_count}/{total_count} queryable CSS selectors matched; {skipped_count} state/pseudo selectors skipped",
+        )
+    ]
+
+    if not changed_selectors:
+        results.append(
+            CheckResult(
+                name="viewer_css_diff",
+                percent=None,
+                minimum=diff_min,
+                passed=True,
+                detail="no changed viewer.html CSS selectors",
+            )
+        )
+        return results
+
+    covered_changed = changed_selectors & used_selectors
+    diff_percent = len(covered_changed) / len(changed_selectors) * 100
+    missing = ", ".join(sorted(changed_selectors - used_selectors)) or "none"
+    results.append(
+        CheckResult(
+            name="viewer_css_diff",
+            percent=diff_percent,
+            minimum=diff_min,
+            passed=diff_percent >= diff_min,
+            detail=f"{len(covered_changed)}/{len(changed_selectors)} changed CSS selectors matched; missing: {missing}",
+        )
+    )
+    return results
+
+
 def print_results(results: list[CheckResult]) -> None:
     for result in results:
         status = "PASS" if result.passed else "FAIL"
@@ -343,6 +553,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--skip-python", action="store_true")
     parser.add_argument("--skip-viewer-js", action="store_true")
+    parser.add_argument("--skip-viewer-css", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -367,6 +578,14 @@ def main(argv: list[str] | None = None) -> int:
                 changed_viewer_functions(REPO_ROOT / "claude_tap" / "viewer.html", changed_lines),
                 thresholds["viewer_js_function_min"],
                 thresholds["viewer_js_diff_min"],
+            )
+        )
+    if not args.skip_viewer_css:
+        results.extend(
+            check_viewer_css_coverage(
+                changed_viewer_css_selectors(REPO_ROOT / "claude_tap" / "viewer.html", changed_lines),
+                thresholds["viewer_css_selector_min"],
+                thresholds["viewer_css_diff_min"],
             )
         )
 

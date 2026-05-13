@@ -24,6 +24,8 @@ Coverage gates are configured in `pyproject.toml` under `[tool.claude_tap.covera
 - Backend Python incremental coverage: at least `80%` of changed executable package lines.
 - Frontend viewer JavaScript function coverage: at least `50%` of V8-reported inline JS functions executed by the viewer contract suite.
 - Frontend viewer JavaScript incremental coverage: at least `80%` of changed `viewer.html` JavaScript functions exercised by V8 coverage.
+- Frontend viewer CSS selector coverage: at least `65%` of queryable CSS selectors must match real DOM states exercised by the viewer contract suite.
+- Frontend viewer CSS incremental coverage: at least `80%` of changed queryable `viewer.html` CSS selectors must match exercised DOM states.
 
 Run the deterministic coverage gate with:
 
@@ -43,13 +45,18 @@ Every new or changed test must assert at least one meaningful contract:
 - returned values, normalized data, status transitions, or error behavior for
   Python code;
 - rendered DOM sections, visible semantic text, user interactions, browser
-  runtime errors, or V8-executed viewer functions for `viewer.html`;
+  runtime errors, V8-executed viewer functions, or CSS-backed layout and theme
+  states for `viewer.html`;
 - persisted files, trace records, or generated evidence when the change affects
   filesystem output.
 
 Viewer tests must prefer generated HTML opened in Chromium for user-visible
 behavior. `Full JSON` may be asserted as a fallback section, but a viewer test
 must not treat `Full JSON` alone as successful semantic rendering.
+
+Viewer style changes must prove more than screenshot existence. Tests should
+assert durable layout and visual contracts such as desktop/mobile widths,
+overflow bounds, expanded content dimensions, and light/dark theme differences.
 
 # Pre-work Checklist
 

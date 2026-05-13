@@ -623,3 +623,79 @@ def test_viewer_v8_coverage_exercises_core_inline_js_functions(tmp_path: Path, c
     assert errors == []
     assert required_functions <= covered_names
     assert used_main_script_bytes > 50_000
+
+
+def test_viewer_visual_layout_contracts_cover_css_modes(tmp_path: Path, chromium_browser) -> None:
+    records = tuple(record for case in _contract_cases() for record in case.records)
+    html_path = _generate_case_html(tmp_path, "visual_contract", records)
+
+    page = chromium_browser.new_page(viewport={"width": 1440, "height": 1000})
+    try:
+        errors = _open_viewer_with_error_capture(page, html_path)
+        page.evaluate("entryIndex => renderDetail(entries[entryIndex])", len(records) - 1)
+        page.evaluate(
+            """() => {
+              const toolsSection = Array.from(document.querySelectorAll('#detail .section'))
+                .find(section => section.querySelector('.title')?.textContent === 'Tools');
+              if (toolsSection && !toolsSection.querySelector('.section-body')?.classList.contains('open')) {
+                toolsSection.querySelector('.section-header').click();
+              }
+            }"""
+        )
+
+        def snapshot(width: int, height: int, theme: str, mobile: bool = False) -> dict:
+            page.set_viewport_size({"width": width, "height": height})
+            page.evaluate("theme => document.documentElement.setAttribute('data-theme', theme)", theme)
+            if mobile:
+                page.evaluate("mobileShowDetail()")
+            return page.evaluate(
+                """() => {
+                  const rect = selector => {
+                    const el = document.querySelector(selector);
+                    if (!el) return null;
+                    const r = el.getBoundingClientRect();
+                    return { width: r.width, height: r.height, left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+                  };
+                  const color = selector => getComputedStyle(document.querySelector(selector)).backgroundColor;
+                  return {
+                    overflowX: document.documentElement.scrollWidth - window.innerWidth,
+                    bodyBg: getComputedStyle(document.body).backgroundColor,
+                    userMsgBg: color('.msg.user'),
+                    sidebar: rect('#sidebar-wrap'),
+                    detail: rect('#detail'),
+                    sectionHeader: rect('.section-header'),
+                    tokenBar: rect('.token-bar'),
+                    message: rect('.msg'),
+                    toolBlock: rect('.tool-block'),
+                    response: rect('.section-body.open .content-block'),
+                    sectionCount: document.querySelectorAll('#detail .section').length,
+                  };
+                }"""
+            )
+
+        desktop_light = snapshot(1440, 1000, "light")
+        desktop_dark = snapshot(1440, 1000, "dark")
+        mobile_dark = snapshot(390, 900, "dark", mobile=True)
+    finally:
+        page.close()
+
+    assert errors == []
+    for result in (desktop_light, desktop_dark, mobile_dark):
+        assert result["overflowX"] <= 2
+        assert result["sectionCount"] >= 5
+        assert result["sectionHeader"]["height"] >= 28
+        assert result["tokenBar"]["width"] > 250
+        assert result["message"]["height"] > 40
+        assert result["toolBlock"]["width"] > 250
+        assert result["response"]["height"] > 20
+
+    assert desktop_light["sidebar"]["width"] >= 280
+    assert desktop_light["detail"]["width"] >= 1000
+    assert desktop_dark["sidebar"]["width"] >= 280
+    assert desktop_dark["detail"]["width"] >= 1000
+    assert desktop_light["bodyBg"] != desktop_dark["bodyBg"]
+    assert desktop_light["userMsgBg"] != desktop_dark["userMsgBg"]
+
+    assert mobile_dark["sidebar"]["width"] == 0
+    assert mobile_dark["detail"]["width"] == 390
+    assert mobile_dark["detail"]["left"] == 0
